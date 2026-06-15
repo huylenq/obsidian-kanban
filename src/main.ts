@@ -37,6 +37,7 @@ interface HuyBacklogTask {
   title: string;
   status: string;
   tags: string[];
+  backlogId: string;
 }
 
 function normalizeFrontmatterList(value: unknown): string[] {
@@ -238,25 +239,29 @@ export default class KanbanPlugin extends Plugin {
         return;
       }
 
-      const tasks: HuyBacklogTask[] = folder.children
-        .filter((child): child is TFile => child instanceof TFile && child.extension === 'md')
-        .map((file) => {
-          const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
-          const title = String(frontmatter.title || file.basename).trim();
-          const status = String(frontmatter.status || 'Backlog').trim();
-          const tags = normalizeFrontmatterList(frontmatter.tags)
-            .map(normalizeInlineTag)
-            .filter((tag): tag is string => !!tag);
+      const tasks: HuyBacklogTask[] = [];
+      for (const file of folder.children.filter(
+        (child): child is TFile => child instanceof TFile && child.extension === 'md'
+      )) {
+        const backlogId = await this.ensureBacklogId(file);
+        const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
+        const title = String(frontmatter.title || file.basename).replace(/^['\"]|['\"]$/g, '').trim();
+        const status = String(frontmatter.status || 'Backlog').replace(/^['\"]|['\"]$/g, '').trim();
+        const tags = normalizeFrontmatterList(frontmatter.tags)
+          .map(normalizeInlineTag)
+          .filter((tag): tag is string => !!tag);
 
-          return {
-            path: file.path,
-            basename: file.basename,
-            title,
-            status,
-            tags,
-          };
-        })
-        .sort((a, b) => a.title.localeCompare(b.title));
+        tasks.push({
+          path: file.path,
+          basename: file.basename,
+          title,
+          status,
+          tags,
+          backlogId,
+        });
+      }
+
+      tasks.sort((a, b) => a.title.localeCompare(b.title));
 
       const statuses = sortStatuses(Array.from(new Set(tasks.map((task) => task.status))));
       const lines: string[] = [
@@ -275,7 +280,7 @@ export default class KanbanPlugin extends Plugin {
         const statusTasks = tasks.filter((task) => task.status === status);
         for (const task of statusTasks) {
           const tags = task.tags.length ? ` ${task.tags.join(' ')}` : '';
-          lines.push(`- [ ] [[Backlog/${task.basename}|${task.title}]]${tags}`);
+          lines.push(`- [ ] [[Backlog/${task.basename}|${task.title}]]${tags} <!--backlog-id: ${task.backlogId}-->`);
         }
 
         lines.push('');
@@ -364,6 +369,71 @@ export default class KanbanPlugin extends Plugin {
     return JSON.stringify(value);
   }
 
+  generateBacklogId() {
+    return `kb-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  getBacklogIdFromCard(text: string) {
+    return text.match(/<!--\s*backlog-id:\s*([^\s>]+)\s*-->/)?.[1] || null;
+  }
+
+  stripBacklogIdComment(text: string) {
+    return text.replace(/\s*<!--\s*backlog-id:\s*[^\s>]+\s*-->/g, '').trim();
+  }
+
+  getBacklogLinkPath(text: string) {
+    const link = text.match(/\[\[([^|\]]+)(?:\|[^\]]+)?\]\]/)?.[1];
+    if (!link) return null;
+
+    const normalized = link.replace(/\.md$/, '');
+    if (normalized.startsWith('Backlog/')) {
+      return `${HUY_BACKLOG_FOLDER}/${normalized.slice('Backlog/'.length)}.md`;
+    }
+
+    if (normalized.startsWith(`${HUY_BACKLOG_FOLDER}/`)) {
+      return `${normalized}.md`;
+    }
+
+    return null;
+  }
+
+  findBacklogFileById(backlogId: string) {
+    const folder = this.app.vault.getAbstractFileByPath(HUY_BACKLOG_FOLDER);
+    if (!(folder instanceof TFolder)) return null;
+
+    for (const child of folder.children) {
+      if (!(child instanceof TFile) || child.extension !== 'md') continue;
+      const frontmatter = this.app.metadataCache.getFileCache(child)?.frontmatter || {};
+      if (frontmatter.backlog_id === backlogId) return child;
+    }
+
+    return null;
+  }
+
+  async ensureBacklogId(file: TFile) {
+    let backlogId = this.app.metadataCache.getFileCache(file)?.frontmatter?.backlog_id;
+    if (typeof backlogId === 'string' && backlogId.trim()) return backlogId.trim();
+
+    backlogId = this.generateBacklogId();
+    await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+      frontmatter.backlog_id = backlogId;
+    });
+
+    return backlogId;
+  }
+
+  async rewriteBacklogCardForFile(rawTitle: string, file: TFile, check: string, indent: string) {
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
+    const title = String(frontmatter.title || file.basename).replace(/^['\"]|['\"]$/g, '').trim() || file.basename;
+    const tags = normalizeFrontmatterList(frontmatter.tags)
+      .map(normalizeInlineTag)
+      .filter((tag): tag is string => !!tag);
+    const backlinkId = await this.ensureBacklogId(file);
+    const inlineTags = tags.length ? ` ${tags.join(' ')}` : '';
+
+    return `${indent}- [${check}] [[Backlog/${file.basename}|${title}]]${inlineTags} <!--backlog-id: ${backlinkId}-->`;
+  }
+
   async uniqueBacklogPath(title: string) {
     const base = this.sanitizeBacklogFilename(title);
     let candidate = `${HUY_BACKLOG_FOLDER}/${base}.md`;
@@ -379,12 +449,14 @@ export default class KanbanPlugin extends Plugin {
 
   async createBacklogTaskFromKanbanCard(title: string, status: string, tags: string[]) {
     const path = await this.uniqueBacklogPath(title);
+    const backlogId = this.generateBacklogId();
     const created = new Date().toISOString().slice(0, 10);
     const tagLines = tags.length ? tags.map((tag) => `  - ${this.yamlString(tag)}`).join('\n') : '';
     const content = [
       '---',
       `title: ${this.yamlString(title)}`,
       `status: ${this.yamlString(status)}`,
+      `backlog_id: ${this.yamlString(backlogId)}`,
       'projects:',
       '  - "[[Projects/HON/Index]]"',
       ...(tags.length ? ['tags:', tagLines] : []),
@@ -401,7 +473,10 @@ export default class KanbanPlugin extends Plugin {
 
     await this.app.vault.create(path, content);
 
-    return path.replace(/\.md$/, '').replace(`${HUY_BACKLOG_FOLDER}/`, 'Backlog/');
+    return {
+      linkPath: path.replace(/\.md$/, '').replace(`${HUY_BACKLOG_FOLDER}/`, 'Backlog/'),
+      backlogId,
+    };
   }
 
   async prepareHuyBacklogKanbanForSave(
@@ -430,23 +505,38 @@ export default class KanbanPlugin extends Plugin {
       }
 
       const [, indent, check, rawTitle] = card;
-      if (/\[\[Backlog\//.test(rawTitle) || /\[\[Aitomatic\/Backlog\//.test(rawTitle)) {
-        output.push(line);
-        continue;
+      const cleanRawTitle = this.stripBacklogIdComment(rawTitle);
+      const existingBacklogId = this.getBacklogIdFromCard(rawTitle);
+
+      if (existingBacklogId) {
+        const linkedFile = this.findBacklogFileById(existingBacklogId);
+        if (linkedFile) {
+          output.push(await this.rewriteBacklogCardForFile(cleanRawTitle, linkedFile, check, indent));
+          continue;
+        }
       }
 
-      const titleWithoutTags = this.stripInlineTags(rawTitle);
+      const linkedPath = this.getBacklogLinkPath(cleanRawTitle);
+      if (linkedPath) {
+        const linked = this.app.vault.getAbstractFileByPath(linkedPath);
+        if (linked instanceof TFile) {
+          output.push(await this.rewriteBacklogCardForFile(cleanRawTitle, linked, check, indent));
+          continue;
+        }
+      }
+
+      const titleWithoutTags = this.stripInlineTags(cleanRawTitle);
       const plainTitle = this.stripMarkdownLinks(titleWithoutTags).trim();
       if (!plainTitle) {
         output.push(line);
         continue;
       }
 
-      const tags = this.extractInlineTags(rawTitle);
-      const backlogLink = await this.createBacklogTaskFromKanbanCard(plainTitle, currentStatus, tags);
+      const tags = this.extractInlineTags(cleanRawTitle);
+      const backlog = await this.createBacklogTaskFromKanbanCard(plainTitle, currentStatus, tags);
       const inlineTags = tags.map((tag) => `#${tag}`).join(' ');
       const suffix = inlineTags ? ` ${inlineTags}` : '';
-      output.push(`${indent}- [${check}] [[${backlogLink}|${plainTitle}]]${suffix}`);
+      output.push(`${indent}- [${check}] [[${backlog.linkPath}|${plainTitle}]]${suffix} <!--backlog-id: ${backlog.backlogId}-->`);
       createdCount += 1;
     }
 
