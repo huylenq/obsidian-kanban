@@ -148,6 +148,7 @@ export default class KanbanPlugin extends Plugin {
   MarkdownEditor: any;
 
   async onload() {
+    await this.writeHuyForkLoadMarker('onload-start');
     await this.loadSettings();
 
     this.MarkdownEditor = getEditorClass(this.app);
@@ -200,17 +201,14 @@ export default class KanbanPlugin extends Plugin {
       this.newKanban();
     });
 
-    this.writeHuyForkLoadMarker();
+    this.writeHuyForkLoadMarker('onload-end');
   }
 
-  async writeHuyForkLoadMarker() {
+  async writeHuyForkLoadMarker(phase: string = 'loaded') {
     try {
-      const basePath = (this.app.vault.adapter as any).basePath as string;
-      const markerPath = `${basePath}/.obsidian/plugins/obsidian-kanban/huy-load-marker.txt`;
-      await window.require('fs').promises.writeFile(
-        markerPath,
-        `Huy fork loaded at ${new Date().toISOString()}\n`,
-        'utf8'
+      await this.app.vault.adapter.write(
+        '.obsidian/plugins/obsidian-kanban/huy-load-marker.txt',
+        `Huy fork ${phase} at ${new Date().toISOString()}\n`
       );
     } catch (e) {
       console.error('Unable to write Huy fork load marker:', e);
