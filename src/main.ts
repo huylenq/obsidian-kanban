@@ -225,6 +225,12 @@ export default class KanbanPlugin extends Plugin {
 
   async syncHuyBacklogKanban(showNotice: boolean = true) {
     try {
+      const existingBoard = this.app.vault.getAbstractFileByPath(HUY_BACKLOG_BOARD_PATH);
+      if (existingBoard instanceof TFile) {
+        const currentBoard = await this.app.vault.read(existingBoard);
+        await this.prepareHuyBacklogKanbanForSave(existingBoard, currentBoard, false);
+      }
+
       const folder = this.app.vault.getAbstractFileByPath(HUY_BACKLOG_FOLDER);
 
       if (!(folder instanceof TFolder)) {
@@ -314,6 +320,142 @@ export default class KanbanPlugin extends Plugin {
     1000,
     true
   );
+
+  isHuyBacklogKanbanBoard(file: TFile | null | undefined) {
+    return file instanceof TFile && file.path === HUY_BACKLOG_BOARD_PATH;
+  }
+
+  stripInlineTags(text: string) {
+    return text.replace(/(^|\s)#[\p{L}\p{N}/_-]+/gu, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  extractInlineTags(text: string) {
+    const tags: string[] = [];
+    const regex = /(^|\s)#([\p{L}\p{N}/_-]+)/gu;
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(text)) !== null) {
+      tags.push(match[2]);
+    }
+
+    return tags;
+  }
+
+  stripMarkdownLinks(text: string) {
+    return text
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, '$2')
+      .replace(/\[\[([^\]]+)\]\]/g, '$1')
+      .trim();
+  }
+
+  sanitizeBacklogFilename(title: string) {
+    const sanitized = title
+      .replace(/[\\/:*?"<>|]/g, '-')
+      .replace(/#+/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    return sanitized || 'Untitled backlog task';
+  }
+
+  yamlString(value: string) {
+    return JSON.stringify(value);
+  }
+
+  async uniqueBacklogPath(title: string) {
+    const base = this.sanitizeBacklogFilename(title);
+    let candidate = `${HUY_BACKLOG_FOLDER}/${base}.md`;
+    let suffix = 2;
+
+    while (this.app.vault.getAbstractFileByPath(candidate)) {
+      candidate = `${HUY_BACKLOG_FOLDER}/${base} ${suffix}.md`;
+      suffix += 1;
+    }
+
+    return candidate;
+  }
+
+  async createBacklogTaskFromKanbanCard(title: string, status: string, tags: string[]) {
+    const path = await this.uniqueBacklogPath(title);
+    const created = new Date().toISOString().slice(0, 10);
+    const tagLines = tags.length ? tags.map((tag) => `  - ${this.yamlString(tag)}`).join('\n') : '';
+    const content = [
+      '---',
+      `title: ${this.yamlString(title)}`,
+      `status: ${this.yamlString(status)}`,
+      'projects:',
+      '  - "[[Projects/HON/Index]]"',
+      ...(tags.length ? ['tags:', tagLines] : []),
+      `created: ${this.yamlString(created)}`,
+      'origin:',
+      `  - "[[${HUY_BACKLOG_BOARD_PATH.replace(/\.md$/, '')}]]"`,
+      '---',
+      '',
+      '## Context',
+      '',
+      `Created from [[${HUY_BACKLOG_BOARD_PATH.replace(/\.md$/, '')}]] via Kanban Add Card.`,
+      '',
+    ].join('\n');
+
+    await this.app.vault.create(path, content);
+
+    return path.replace(/\.md$/, '').replace(`${HUY_BACKLOG_FOLDER}/`, 'Backlog/');
+  }
+
+  async prepareHuyBacklogKanbanForSave(
+    file: TFile | null | undefined,
+    data: string,
+    showNotice: boolean = true
+  ) {
+    if (!this.isHuyBacklogKanbanBoard(file)) return data;
+
+    const output: string[] = [];
+    let currentStatus = 'Backlog';
+    let createdCount = 0;
+
+    for (const line of data.split('\n')) {
+      const heading = line.match(/^##\s+(.+?)\s*$/);
+      if (heading) {
+        currentStatus = heading[1].trim();
+        output.push(line);
+        continue;
+      }
+
+      const card = line.match(/^(\s*)- \[([ xX-])\]\s+(.+?)\s*$/);
+      if (!card) {
+        output.push(line);
+        continue;
+      }
+
+      const [, indent, check, rawTitle] = card;
+      if (/\[\[Backlog\//.test(rawTitle) || /\[\[Aitomatic\/Backlog\//.test(rawTitle)) {
+        output.push(line);
+        continue;
+      }
+
+      const titleWithoutTags = this.stripInlineTags(rawTitle);
+      const plainTitle = this.stripMarkdownLinks(titleWithoutTags).trim();
+      if (!plainTitle) {
+        output.push(line);
+        continue;
+      }
+
+      const tags = this.extractInlineTags(rawTitle);
+      const backlogLink = await this.createBacklogTaskFromKanbanCard(plainTitle, currentStatus, tags);
+      const inlineTags = tags.map((tag) => `#${tag}`).join(' ');
+      const suffix = inlineTags ? ` ${inlineTags}` : '';
+      output.push(`${indent}- [${check}] [[${backlogLink}|${plainTitle}]]${suffix}`);
+      createdCount += 1;
+    }
+
+    if (showNotice && createdCount > 0) {
+      new Notice(`Created ${createdCount} backlog task file${createdCount === 1 ? '' : 's'} from Kanban card${createdCount === 1 ? '' : 's'}`);
+    }
+
+    return output.join('\n');
+  }
 
   getKanbanViews(win: Window) {
     const reg = this.windowRegistry.get(win);

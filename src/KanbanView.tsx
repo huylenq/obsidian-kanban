@@ -201,12 +201,14 @@ export class KanbanView extends TextFileView implements HoverParent {
     }
   }
 
-  requestSaveToDisk(data: string) {
-    if (this.data !== data && this.isPrimary) {
-      this.data = data;
+  async requestSaveToDisk(data: string) {
+    const dataToSave = await this.plugin.prepareHuyBacklogKanbanForSave(this.file, data);
+
+    if (this.data !== dataToSave && this.isPrimary) {
+      this.data = dataToSave;
       this.requestSave();
     } else {
-      this.data = data;
+      this.data = dataToSave;
     }
   }
 
