@@ -487,8 +487,10 @@ export default class KanbanPlugin extends Plugin {
     if (!this.isHuyBacklogKanbanBoard(file)) return data;
 
     const output: string[] = [];
+    const seenBacklogIds = new Set<string>();
     let currentStatus = 'Backlog';
     let createdCount = 0;
+    let removedCount = 0;
 
     for (const line of data.split('\n')) {
       const heading = line.match(/^##\s+(.+?)\s*$/);
@@ -509,11 +511,22 @@ export default class KanbanPlugin extends Plugin {
       const existingBacklogId = this.getBacklogIdFromCard(rawTitle);
 
       if (existingBacklogId) {
+        if (seenBacklogIds.has(existingBacklogId)) {
+          removedCount += 1;
+          continue;
+        }
+
         const linkedFile = this.findBacklogFileById(existingBacklogId);
         if (linkedFile) {
+          seenBacklogIds.add(existingBacklogId);
           output.push(await this.rewriteBacklogCardForFile(cleanRawTitle, linkedFile, check, indent));
           continue;
         }
+
+        // If a card already had a stable backlog_id but its file no longer exists,
+        // the user deleted the source note. Do not resurrect it from stale board text.
+        removedCount += 1;
+        continue;
       }
 
       const linkedPath = this.getBacklogLinkPath(cleanRawTitle);
@@ -523,6 +536,11 @@ export default class KanbanPlugin extends Plugin {
           output.push(await this.rewriteBacklogCardForFile(cleanRawTitle, linked, check, indent));
           continue;
         }
+
+        // Broken Backlog wikilinks are stale references, not new card input.
+        // A brand-new Add Card is plain text; only plain text should create files.
+        removedCount += 1;
+        continue;
       }
 
       const titleWithoutTags = this.stripInlineTags(cleanRawTitle);
@@ -540,8 +558,15 @@ export default class KanbanPlugin extends Plugin {
       createdCount += 1;
     }
 
-    if (showNotice && createdCount > 0) {
-      new Notice(`Created ${createdCount} backlog task file${createdCount === 1 ? '' : 's'} from Kanban card${createdCount === 1 ? '' : 's'}`);
+    if (showNotice && (createdCount > 0 || removedCount > 0)) {
+      const parts: string[] = [];
+      if (createdCount > 0) {
+        parts.push(`created ${createdCount} backlog task file${createdCount === 1 ? '' : 's'}`);
+      }
+      if (removedCount > 0) {
+        parts.push(`removed ${removedCount} stale/duplicate card${removedCount === 1 ? '' : 's'}`);
+      }
+      new Notice(`Huy Backlog Kanban: ${parts.join(', ')}`);
     }
 
     return output.join('\n');
