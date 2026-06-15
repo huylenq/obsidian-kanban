@@ -1,6 +1,7 @@
 import { around } from 'monkey-around';
 import {
   MarkdownView,
+  Notice,
   Platform,
   Plugin,
   TFile,
@@ -25,6 +26,57 @@ interface WindowRegistry {
   viewMap: Map<string, KanbanView>;
   viewStateReceivers: Array<(views: KanbanView[]) => void>;
   appRoot: HTMLElement;
+}
+
+const HUY_BACKLOG_FOLDER = 'Aitomatic/Backlog';
+const HUY_BACKLOG_BOARD_PATH = 'Aitomatic/Backlog Kanban.md';
+
+interface HuyBacklogTask {
+  path: string;
+  basename: string;
+  title: string;
+  status: string;
+  tags: string[];
+}
+
+function normalizeFrontmatterList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+
+  if (typeof value === 'string') {
+    return value
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function normalizeInlineTag(tag: string): string | null {
+  const normalized = tag
+    .replace(/^#+/, '')
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^\p{L}\p{N}/_-]/gu, '');
+
+  return normalized ? `#${normalized}` : null;
+}
+
+function sortStatuses(statuses: string[]): string[] {
+  const order = ['Active', 'In Progress', 'Todo', 'Backlog', 'Waiting', 'Blocked', 'Done', 'Canceled', 'Cancelled'];
+
+  return statuses.sort((a, b) => {
+    const ai = order.indexOf(a);
+    const bi = order.indexOf(b);
+
+    if (ai !== -1 || bi !== -1) {
+      return (ai === -1 ? Number.MAX_SAFE_INTEGER : ai) - (bi === -1 ? Number.MAX_SAFE_INTEGER : bi);
+    }
+
+    return a.localeCompare(b);
+  });
 }
 
 function getEditorClass(app: any) {
@@ -152,6 +204,102 @@ export default class KanbanPlugin extends Plugin {
   handleShift = (e: KeyboardEvent) => {
     this.isShiftPressed = e.shiftKey;
   };
+
+  isHuyBacklogFile(file: unknown) {
+    return file instanceof TFile && file.extension === 'md' && file.path.startsWith(`${HUY_BACKLOG_FOLDER}/`);
+  }
+
+  async syncHuyBacklogKanban(showNotice: boolean = true) {
+    try {
+      const folder = this.app.vault.getAbstractFileByPath(HUY_BACKLOG_FOLDER);
+
+      if (!(folder instanceof TFolder)) {
+        if (showNotice) new Notice(`Backlog folder not found: ${HUY_BACKLOG_FOLDER}`);
+        return;
+      }
+
+      const tasks: HuyBacklogTask[] = folder.children
+        .filter((child): child is TFile => child instanceof TFile && child.extension === 'md')
+        .map((file) => {
+          const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
+          const title = String(frontmatter.title || file.basename).trim();
+          const status = String(frontmatter.status || 'Backlog').trim();
+          const tags = normalizeFrontmatterList(frontmatter.tags)
+            .map(normalizeInlineTag)
+            .filter((tag): tag is string => !!tag);
+
+          return {
+            path: file.path,
+            basename: file.basename,
+            title,
+            status,
+            tags,
+          };
+        })
+        .sort((a, b) => a.title.localeCompare(b.title));
+
+      const statuses = sortStatuses(Array.from(new Set(tasks.map((task) => task.status))));
+      const lines: string[] = [
+        '---',
+        'kanban-plugin: board',
+        'tags:',
+        '  - aitomatic/backlog',
+        '  - kanban',
+        '---',
+        '',
+      ];
+
+      for (const status of statuses) {
+        lines.push(`## ${status}`, '');
+
+        const statusTasks = tasks.filter((task) => task.status === status);
+        for (const task of statusTasks) {
+          const tags = task.tags.length ? ` ${task.tags.join(' ')}` : '';
+          lines.push(`- [ ] [[Backlog/${task.basename}|${task.title}]]${tags}`);
+        }
+
+        lines.push('');
+      }
+
+      lines.push(
+        '%% kanban:settings',
+        '```',
+        JSON.stringify({
+          'kanban-plugin': 'board',
+          'list-collapse': statuses.map(() => false),
+          'new-card-insertion-method': 'prepend',
+          'show-checkboxes': true,
+          'link-date-to-daily-note': false,
+        }),
+        '```',
+        '%%',
+        ''
+      );
+
+      const content = lines.join('\n');
+      const existing = this.app.vault.getAbstractFileByPath(HUY_BACKLOG_BOARD_PATH);
+
+      if (existing instanceof TFile) {
+        const current = await this.app.vault.read(existing);
+        if (current !== content) {
+          await this.app.vault.modify(existing, content);
+        }
+      } else {
+        await this.app.vault.create(HUY_BACKLOG_BOARD_PATH, content);
+      }
+
+      if (showNotice) new Notice(`Synced ${tasks.length} backlog tasks to Backlog Kanban`);
+    } catch (e) {
+      console.error('Error syncing Huy backlog kanban:', e);
+      if (showNotice) new Notice(`Backlog Kanban sync failed: ${e}`);
+    }
+  }
+
+  syncHuyBacklogKanbanDebounced = debounce(
+    () => this.syncHuyBacklogKanban(false),
+    1000,
+    true
+  );
 
   getKanbanViews(win: Window) {
     const reg = this.windowRegistry.get(win);
@@ -523,6 +671,26 @@ export default class KanbanPlugin extends Plugin {
         kanbanLeaves.forEach((leaf) => {
           (leaf.view as KanbanView).handleRename(file.path, oldPath);
         });
+
+        if (this.isHuyBacklogFile(file) || oldPath.startsWith(`${HUY_BACKLOG_FOLDER}/`)) {
+          this.syncHuyBacklogKanbanDebounced();
+        }
+      })
+    );
+
+    this.registerEvent(
+      app.vault.on('create', (file) => {
+        if (this.isHuyBacklogFile(file)) {
+          this.syncHuyBacklogKanbanDebounced();
+        }
+      })
+    );
+
+    this.registerEvent(
+      app.vault.on('delete', (file) => {
+        if (this.isHuyBacklogFile(file)) {
+          this.syncHuyBacklogKanbanDebounced();
+        }
       })
     );
 
@@ -542,6 +710,10 @@ export default class KanbanPlugin extends Plugin {
       app.vault.on('modify', (file) => {
         if (file instanceof TFile) {
           notifyFileChange(file);
+
+          if (this.isHuyBacklogFile(file)) {
+            this.syncHuyBacklogKanbanDebounced();
+          }
         }
       })
     );
@@ -549,6 +721,10 @@ export default class KanbanPlugin extends Plugin {
     this.registerEvent(
       app.metadataCache.on('changed', (file) => {
         notifyFileChange(file);
+
+        if (this.isHuyBacklogFile(file)) {
+          this.syncHuyBacklogKanbanDebounced();
+        }
       })
     );
 
@@ -577,6 +753,12 @@ export default class KanbanPlugin extends Plugin {
       id: 'create-new-kanban-board',
       name: t('Create new board'),
       callback: () => this.newKanban(),
+    });
+
+    this.addCommand({
+      id: 'sync-huy-backlog-kanban',
+      name: 'Sync Huy Backlog Kanban from frontmatter',
+      callback: () => this.syncHuyBacklogKanban(true),
     });
 
     this.addCommand({
