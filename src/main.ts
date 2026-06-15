@@ -225,11 +225,17 @@ export default class KanbanPlugin extends Plugin {
   }
 
   async syncHuyBacklogKanban(showNotice: boolean = true) {
+    if (this._isSyncingHuyBacklog) return;
+    this._isSyncingHuyBacklog = true;
     try {
       const existingBoard = this.app.vault.getAbstractFileByPath(HUY_BACKLOG_BOARD_PATH);
       if (existingBoard instanceof TFile) {
         const currentBoard = await this.app.vault.read(existingBoard);
-        await this.prepareHuyBacklogKanbanForSave(existingBoard, currentBoard, false);
+        // updateStatuses=false: source file is truth here; board position must not
+        // overwrite a status that the user changed directly in the note.
+        // This call's only purpose is to flush any plain-text Add Card entries into
+        // real files before the full rebuild below enumerates the folder.
+        await this.prepareHuyBacklogKanbanForSave(existingBoard, currentBoard, false, false);
       }
 
       const folder = this.app.vault.getAbstractFileByPath(HUY_BACKLOG_FOLDER);
@@ -317,6 +323,8 @@ export default class KanbanPlugin extends Plugin {
     } catch (e) {
       console.error('Error syncing Huy backlog kanban:', e);
       if (showNotice) new Notice(`Backlog Kanban sync failed: ${e}`);
+    } finally {
+      this._isSyncingHuyBacklog = false;
     }
   }
 
@@ -411,15 +419,33 @@ export default class KanbanPlugin extends Plugin {
   }
 
   async ensureBacklogId(file: TFile) {
-    let backlogId = this.app.metadataCache.getFileCache(file)?.frontmatter?.backlog_id;
-    if (typeof backlogId === 'string' && backlogId.trim()) return backlogId.trim();
+    // Fast path: trust the cache when it has an ID.
+    const cachedId = this.app.metadataCache.getFileCache(file)?.frontmatter?.backlog_id;
+    if (typeof cachedId === 'string' && cachedId.trim()) return cachedId.trim();
 
-    backlogId = this.generateBacklogId();
+    // Slow path: read actual frontmatter so we never overwrite an ID that exists on
+    // disk but hasn't propagated to the cache yet (e.g., right after a rename).
+    let assignedId = '';
     await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-      frontmatter.backlog_id = backlogId;
+      const existing = frontmatter.backlog_id;
+      if (typeof existing === 'string' && existing.trim()) {
+        assignedId = existing.trim();
+      } else {
+        assignedId = this.generateBacklogId();
+        frontmatter.backlog_id = assignedId;
+      }
     });
 
-    return backlogId;
+    return assignedId;
+  }
+
+  async maybeUpdateBacklogStatus(file: TFile, newStatus: string) {
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
+    const currentStatus = String(frontmatter.status || 'Backlog').replace(/^['\"]|['\"]$/g, '').trim();
+    if (currentStatus === newStatus) return;
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      fm.status = newStatus;
+    });
   }
 
   async rewriteBacklogCardForFile(rawTitle: string, file: TFile, check: string, indent: string) {
@@ -479,10 +505,17 @@ export default class KanbanPlugin extends Plugin {
     };
   }
 
+  // When true, prevents syncHuyBacklogKanban from re-entering itself via vault events
+  // triggered by ensureBacklogId / maybeUpdateBacklogStatus writes during a sync.
+  _isSyncingHuyBacklog = false;
+
   async prepareHuyBacklogKanbanForSave(
     file: TFile | null | undefined,
     data: string,
-    showNotice: boolean = true
+    showNotice: boolean = true,
+    // updateStatuses=false when called from syncHuyBacklogKanban so that source-file
+    // status always wins over stale board position during a full rebuild.
+    updateStatuses: boolean = true
   ) {
     if (!this.isHuyBacklogKanbanBoard(file)) return data;
 
@@ -519,12 +552,13 @@ export default class KanbanPlugin extends Plugin {
         const linkedFile = this.findBacklogFileById(existingBacklogId);
         if (linkedFile) {
           seenBacklogIds.add(existingBacklogId);
+          if (updateStatuses) await this.maybeUpdateBacklogStatus(linkedFile, currentStatus);
           output.push(await this.rewriteBacklogCardForFile(cleanRawTitle, linkedFile, check, indent));
           continue;
         }
 
-        // If a card already had a stable backlog_id but its file no longer exists,
-        // the user deleted the source note. Do not resurrect it from stale board text.
+        // Card had a stable backlog_id but its file no longer exists → user deleted the
+        // source note. Do not resurrect it.
         removedCount += 1;
         continue;
       }
@@ -533,12 +567,12 @@ export default class KanbanPlugin extends Plugin {
       if (linkedPath) {
         const linked = this.app.vault.getAbstractFileByPath(linkedPath);
         if (linked instanceof TFile) {
+          if (updateStatuses) await this.maybeUpdateBacklogStatus(linked, currentStatus);
           output.push(await this.rewriteBacklogCardForFile(cleanRawTitle, linked, check, indent));
           continue;
         }
 
-        // Broken Backlog wikilinks are stale references, not new card input.
-        // A brand-new Add Card is plain text; only plain text should create files.
+        // Broken Backlog wikilink with no matching file → stale reference, not new input.
         removedCount += 1;
         continue;
       }
