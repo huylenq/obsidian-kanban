@@ -199,6 +199,22 @@ export default class KanbanPlugin extends Plugin {
     this.addRibbonIcon(kanbanIcon, t('Create new board'), () => {
       this.newKanban();
     });
+
+    this.writeHuyForkLoadMarker();
+  }
+
+  async writeHuyForkLoadMarker() {
+    try {
+      const basePath = (this.app.vault.adapter as any).basePath as string;
+      const markerPath = `${basePath}/.obsidian/plugins/obsidian-kanban/huy-load-marker.txt`;
+      await window.require('fs').promises.writeFile(
+        markerPath,
+        `Huy fork loaded at ${new Date().toISOString()}\n`,
+        'utf8'
+      );
+    } catch (e) {
+      console.error('Unable to write Huy fork load marker:', e);
+    }
   }
 
   handleShift = (e: KeyboardEvent) => {
