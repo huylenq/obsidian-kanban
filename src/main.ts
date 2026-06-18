@@ -20,6 +20,17 @@ import { DateSuggest, TimeSuggest } from './components/Editor/suggest';
 import { getParentWindow } from './dnd/util/getWindow';
 import { hasFrontmatterKey } from './helpers';
 import { t } from './lang/helpers';
+import {
+  HUY_LEGACY_TASK_BOARD_PATH,
+  HUY_LEGACY_TASK_FOLDER,
+  HUY_TASK_ARCHIVE_AFTER_DAYS,
+  HUY_TASK_ARCHIVE_FOLDER,
+  HUY_TASK_BOARD_PATH,
+  HUY_TASK_FOLDER,
+  archivePathForTask,
+  isDoneTaskStatus,
+  shouldArchiveDoneTask,
+} from './huyTaskArchive';
 import { basicFrontmatter, frontmatterKey } from './parsers/common';
 
 interface WindowRegistry {
@@ -28,10 +39,10 @@ interface WindowRegistry {
   appRoot: HTMLElement;
 }
 
-const HUY_BACKLOG_FOLDER = 'Aitomatic/Tasks';
-const HUY_LEGACY_BACKLOG_FOLDER = 'Aitomatic/Backlog';
-const HUY_BACKLOG_BOARD_PATH = 'Aitomatic/Task Kanban.md';
-const HUY_LEGACY_BACKLOG_BOARD_PATH = 'Aitomatic/Backlog Kanban.md';
+const HUY_BACKLOG_FOLDER = HUY_TASK_FOLDER;
+const HUY_LEGACY_BACKLOG_FOLDER = HUY_LEGACY_TASK_FOLDER;
+const HUY_BACKLOG_BOARD_PATH = HUY_TASK_BOARD_PATH;
+const HUY_LEGACY_BACKLOG_BOARD_PATH = HUY_LEGACY_TASK_BOARD_PATH;
 
 interface HuyBacklogTask {
   path: string;
@@ -481,6 +492,105 @@ export default class KanbanPlugin extends Plugin {
     }
 
     return candidate;
+  }
+
+  async ensureHuyTaskArchiveFolder(folder: string) {
+    const parts = folder.split('/');
+    let current = '';
+
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      const existing = this.app.vault.getAbstractFileByPath(current);
+      if (existing instanceof TFolder) continue;
+      if (existing) throw new Error(`Archive path exists but is not a folder: ${current}`);
+      await this.app.vault.createFolder(current);
+    }
+  }
+
+  async uniqueHuyTaskArchivePath(path: string, todayIso: string) {
+    const target = archivePathForTask(path, todayIso);
+    await this.ensureHuyTaskArchiveFolder(target.folder);
+
+    const dotIndex = target.path.toLowerCase().endsWith('.md') ? target.path.length - 3 : target.path.length;
+    const stem = target.path.slice(0, dotIndex);
+    const ext = target.path.slice(dotIndex);
+    let candidate = target.path;
+    let suffix = 2;
+
+    while (this.app.vault.getAbstractFileByPath(candidate)) {
+      candidate = `${stem} ${suffix}${ext}`;
+      suffix += 1;
+    }
+
+    return candidate;
+  }
+
+  async archiveHuyTaskFile(file: TFile, reason: string = 'done-manual') {
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const targetPath = await this.uniqueHuyTaskArchivePath(file.path, todayIso);
+
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      fm.status = 'Done';
+      fm.archived = todayIso;
+      fm.archive_reason = reason;
+    });
+
+    await this.app.vault.rename(file, targetPath);
+    return targetPath;
+  }
+
+  async archiveHuyDoneTaskCard(rawTitle: string) {
+    if (!this.app.vault.getAbstractFileByPath(HUY_BACKLOG_FOLDER)) return false;
+
+    const backlogId = this.getBacklogIdFromCard(rawTitle);
+    let file = backlogId ? this.findBacklogFileById(backlogId) : null;
+
+    if (!file) {
+      const linkedPath = this.getBacklogLinkPath(rawTitle);
+      const linked = linkedPath ? this.app.vault.getAbstractFileByPath(linkedPath) : null;
+      if (linked instanceof TFile) file = linked;
+    }
+
+    if (!file) {
+      new Notice('No task file found for this Done card.');
+      return false;
+    }
+
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
+    if (!isDoneTaskStatus(frontmatter.status)) {
+      new Notice('Only Done task files can be archived.');
+      return false;
+    }
+
+    const targetPath = await this.archiveHuyTaskFile(file, 'done-card-button');
+    new Notice(`Archived task to ${targetPath}`);
+    this.syncHuyBacklogKanbanDebounced();
+    return true;
+  }
+
+  async archiveOldHuyDoneTasks(thresholdDays = HUY_TASK_ARCHIVE_AFTER_DAYS) {
+    const folder = this.app.vault.getAbstractFileByPath(HUY_BACKLOG_FOLDER);
+    if (!(folder instanceof TFolder)) {
+      new Notice(`Task folder not found: ${HUY_BACKLOG_FOLDER}`);
+      return;
+    }
+
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const archived: string[] = [];
+
+    for (const child of [...folder.children]) {
+      if (!(child instanceof TFile) || child.extension !== 'md') continue;
+      const frontmatter = this.app.metadataCache.getFileCache(child)?.frontmatter || {};
+      if (!shouldArchiveDoneTask(frontmatter, todayIso, thresholdDays)) continue;
+      archived.push(await this.archiveHuyTaskFile(child, `done-older-than-${thresholdDays}-days`));
+    }
+
+    if (archived.length) {
+      new Notice(`Archived ${archived.length} old Done task${archived.length === 1 ? '' : 's'}.`);
+      await this.syncHuyBacklogKanban(false);
+    } else {
+      new Notice(`No Done tasks older than ${thresholdDays} days to archive.`);
+    }
   }
 
   async createBacklogTaskFromKanbanCard(title: string, status: string, tags: string[]) {
@@ -1074,6 +1184,12 @@ export default class KanbanPlugin extends Plugin {
       id: 'sync-huy-task-kanban',
       name: 'Sync Huy Task Kanban from frontmatter',
       callback: () => this.syncHuyBacklogKanban(true),
+    });
+
+    this.addCommand({
+      id: 'archive-old-huy-done-tasks',
+      name: 'Archive old Huy Done tasks',
+      callback: () => this.archiveOldHuyDoneTasks(),
     });
 
     this.addCommand({

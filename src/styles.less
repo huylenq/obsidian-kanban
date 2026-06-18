@@ -503,6 +503,7 @@ div.kanban-plugin__lane-title-count.wip-exceeded {
 .kanban-plugin__table-cell-wrapper .kanban-plugin__item-prefix-button,
 .kanban-plugin__item .kanban-plugin__item-prefix-button,
 .kanban-plugin__item .kanban-plugin__item-postfix-button,
+.kanban-plugin__item .kanban-plugin__item-huy-archive-button,
 .kanban-plugin__lane .kanban-plugin__lane-settings-button {
   --icon-stroke: 2.5px;
   font-size: 13px;
@@ -521,6 +522,20 @@ div.kanban-plugin__lane-title-count.wip-exceeded {
   color: var(--text-faint);
   margin-inline-start: 2px;
   margin-inline-end: 0px;
+}
+
+.kanban-plugin__item .kanban-plugin__item-huy-archive-button {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  font-size: 11px;
+  line-height: 1;
+  margin-inline-start: 4px;
+  opacity: 0.65;
+}
+
+.kanban-plugin__item .kanban-plugin__item-huy-archive-button:hover {
+  opacity: 1;
+  color: var(--text-accent);
 }
 
 .kanban-plugin__table-cell-wrapper,

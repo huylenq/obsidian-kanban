@@ -69,6 +69,21 @@ const ItemInner = memo(function ItemInner({
   }, [item.data.forceEditMode]);
 
   const path = useNestedEntityPath();
+  const lane = stateManager.state?.children?.[path[0]];
+  const isHuyDoneTaskCard =
+    stateManager.getAView().plugin.isHuyBacklogKanbanBoard(stateManager.file) &&
+    lane?.data?.title?.trim().toLowerCase() === 'done' &&
+    /<!--\s*backlog-id:/i.test(item.data.titleRaw);
+
+  const archiveHuyDoneTask = useCallback(
+    async (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const archived = await stateManager.getAView().plugin.archiveHuyDoneTaskCard(item.data.titleRaw);
+      if (archived) boardModifiers.deleteEntity(path);
+    },
+    [boardModifiers, item.data.titleRaw, path, stateManager]
+  );
 
   const showItemMenu = useItemMenu({
     boardModifiers,
@@ -131,6 +146,17 @@ const ItemInner = memo(function ItemInner({
           isStatic={isStatic}
         />
         <ItemMenuButton editState={editState} setEditState={setEditState} showMenu={showItemMenu} />
+        {isHuyDoneTaskCard && !isEditing(editState) && (
+          <button
+            className={c('item-huy-archive-button')}
+            data-ignore-drag={true}
+            title="Archive task file"
+            onClick={archiveHuyDoneTask}
+            type="button"
+          >
+            Archive
+          </button>
+        )}
       </div>
       <ItemMetadata searchQuery={isMatch ? searchQuery : undefined} item={item} />
     </div>
