@@ -28,8 +28,10 @@ interface WindowRegistry {
   appRoot: HTMLElement;
 }
 
-const HUY_BACKLOG_FOLDER = 'Aitomatic/Backlog';
-const HUY_BACKLOG_BOARD_PATH = 'Aitomatic/Backlog Kanban.md';
+const HUY_BACKLOG_FOLDER = 'Aitomatic/Tasks';
+const HUY_LEGACY_BACKLOG_FOLDER = 'Aitomatic/Backlog';
+const HUY_BACKLOG_BOARD_PATH = 'Aitomatic/Task Kanban.md';
+const HUY_LEGACY_BACKLOG_BOARD_PATH = 'Aitomatic/Backlog Kanban.md';
 
 interface HuyBacklogTask {
   path: string;
@@ -66,7 +68,7 @@ function normalizeInlineTag(tag: string): string | null {
 }
 
 function sortStatuses(statuses: string[]): string[] {
-  const order = ['Active', 'In Progress', 'Todo', 'Backlog', 'Waiting', 'Blocked', 'Done', 'Canceled', 'Cancelled'];
+  const order = ['Inbox', 'Todo', 'In-progress', 'In Progress', 'Waiting', 'Blocked', 'Done', 'Canceled', 'Cancelled', 'Backlog', 'Active'];
 
   return statuses.sort((a, b) => {
     const ai = order.indexOf(a);
@@ -221,14 +223,14 @@ export default class KanbanPlugin extends Plugin {
   };
 
   isHuyBacklogFile(file: unknown) {
-    return file instanceof TFile && file.extension === 'md' && file.path.startsWith(`${HUY_BACKLOG_FOLDER}/`);
+    return file instanceof TFile && file.extension === 'md' && (file.path.startsWith(`${HUY_BACKLOG_FOLDER}/`) || file.path.startsWith(`${HUY_LEGACY_BACKLOG_FOLDER}/`));
   }
 
   async syncHuyBacklogKanban(showNotice: boolean = true) {
     if (this._isSyncingHuyBacklog) return;
     this._isSyncingHuyBacklog = true;
     try {
-      const existingBoard = this.app.vault.getAbstractFileByPath(HUY_BACKLOG_BOARD_PATH);
+      const existingBoard = this.app.vault.getAbstractFileByPath(HUY_BACKLOG_BOARD_PATH) || this.app.vault.getAbstractFileByPath(HUY_LEGACY_BACKLOG_BOARD_PATH);
       if (existingBoard instanceof TFile) {
         const currentBoard = await this.app.vault.read(existingBoard);
         // updateStatuses=false: source file is truth here; board position must not
@@ -238,10 +240,11 @@ export default class KanbanPlugin extends Plugin {
         await this.prepareHuyBacklogKanbanForSave(existingBoard, currentBoard, false, false);
       }
 
-      const folder = this.app.vault.getAbstractFileByPath(HUY_BACKLOG_FOLDER);
+      const folder = this.app.vault.getAbstractFileByPath(HUY_BACKLOG_FOLDER)
+        || this.app.vault.getAbstractFileByPath(HUY_LEGACY_BACKLOG_FOLDER);
 
       if (!(folder instanceof TFolder)) {
-        if (showNotice) new Notice(`Backlog folder not found: ${HUY_BACKLOG_FOLDER}`);
+        if (showNotice) new Notice(`Task folder not found: ${HUY_BACKLOG_FOLDER}`);
         return;
       }
 
@@ -252,7 +255,7 @@ export default class KanbanPlugin extends Plugin {
         const backlogId = await this.ensureBacklogId(file);
         const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
         const title = String(frontmatter.title || file.basename).replace(/^['\"]|['\"]$/g, '').trim();
-        const status = String(frontmatter.status || 'Backlog').replace(/^['\"]|['\"]$/g, '').trim();
+        const status = String(frontmatter.status || 'Inbox').replace(/^['\"]|['\"]$/g, '').trim();
         const tags = normalizeFrontmatterList(frontmatter.tags)
           .map(normalizeInlineTag)
           .filter((tag): tag is string => !!tag);
@@ -274,7 +277,7 @@ export default class KanbanPlugin extends Plugin {
         '---',
         'kanban-plugin: board',
         'tags:',
-        '  - aitomatic/backlog',
+        '  - aitomatic/tasks',
         '  - kanban',
         '---',
         '',
@@ -286,7 +289,7 @@ export default class KanbanPlugin extends Plugin {
         const statusTasks = tasks.filter((task) => task.status === status);
         for (const task of statusTasks) {
           const tags = task.tags.length ? ` ${task.tags.join(' ')}` : '';
-          lines.push(`- [ ] [[Backlog/${task.basename}|${task.title}]]${tags} <!--backlog-id: ${task.backlogId}-->`);
+          lines.push(`- [ ] [[Tasks/${task.basename}|${task.title}]]${tags} <!--backlog-id: ${task.backlogId}-->`);
         }
 
         lines.push('');
@@ -319,10 +322,10 @@ export default class KanbanPlugin extends Plugin {
         await this.app.vault.create(HUY_BACKLOG_BOARD_PATH, content);
       }
 
-      if (showNotice) new Notice(`Synced ${tasks.length} backlog tasks to Backlog Kanban`);
+      if (showNotice) new Notice(`Synced ${tasks.length} tasks to Task Kanban`);
     } catch (e) {
-      console.error('Error syncing Huy backlog kanban:', e);
-      if (showNotice) new Notice(`Backlog Kanban sync failed: ${e}`);
+      console.error('Error syncing Huy task kanban:', e);
+      if (showNotice) new Notice(`Task Kanban sync failed: ${e}`);
     } finally {
       this._isSyncingHuyBacklog = false;
     }
@@ -335,7 +338,7 @@ export default class KanbanPlugin extends Plugin {
   );
 
   isHuyBacklogKanbanBoard(file: TFile | null | undefined) {
-    return file instanceof TFile && file.path === HUY_BACKLOG_BOARD_PATH;
+    return file instanceof TFile && (file.path === HUY_BACKLOG_BOARD_PATH || file.path === HUY_LEGACY_BACKLOG_BOARD_PATH);
   }
 
   stripInlineTags(text: string) {
@@ -370,7 +373,7 @@ export default class KanbanPlugin extends Plugin {
       .replace(/\s+/g, ' ')
       .trim();
 
-    return sanitized || 'Untitled backlog task';
+    return sanitized || 'Untitled task';
   }
 
   yamlString(value: string) {
@@ -394,11 +397,15 @@ export default class KanbanPlugin extends Plugin {
     if (!link) return null;
 
     const normalized = link.replace(/\.md$/, '');
-    if (normalized.startsWith('Backlog/')) {
-      return `${HUY_BACKLOG_FOLDER}/${normalized.slice('Backlog/'.length)}.md`;
+    if (normalized.startsWith('Tasks/')) {
+      return `${HUY_BACKLOG_FOLDER}/${normalized.slice('Tasks/'.length)}.md`;
     }
 
-    if (normalized.startsWith(`${HUY_BACKLOG_FOLDER}/`)) {
+    if (normalized.startsWith('Backlog/')) {
+      return `${HUY_LEGACY_BACKLOG_FOLDER}/${normalized.slice('Backlog/'.length)}.md`;
+    }
+
+    if (normalized.startsWith(`${HUY_BACKLOG_FOLDER}/`) || normalized.startsWith(`${HUY_LEGACY_BACKLOG_FOLDER}/`)) {
       return `${normalized}.md`;
     }
 
@@ -406,13 +413,16 @@ export default class KanbanPlugin extends Plugin {
   }
 
   findBacklogFileById(backlogId: string) {
-    const folder = this.app.vault.getAbstractFileByPath(HUY_BACKLOG_FOLDER);
-    if (!(folder instanceof TFolder)) return null;
+    const folders = [HUY_BACKLOG_FOLDER, HUY_LEGACY_BACKLOG_FOLDER]
+      .map((path) => this.app.vault.getAbstractFileByPath(path))
+      .filter((folder): folder is TFolder => folder instanceof TFolder);
 
-    for (const child of folder.children) {
-      if (!(child instanceof TFile) || child.extension !== 'md') continue;
-      const frontmatter = this.app.metadataCache.getFileCache(child)?.frontmatter || {};
-      if (frontmatter.backlog_id === backlogId) return child;
+    for (const folder of folders) {
+      for (const child of folder.children) {
+        if (!(child instanceof TFile) || child.extension !== 'md') continue;
+        const frontmatter = this.app.metadataCache.getFileCache(child)?.frontmatter || {};
+        if (frontmatter.backlog_id === backlogId) return child;
+      }
     }
 
     return null;
@@ -441,7 +451,7 @@ export default class KanbanPlugin extends Plugin {
 
   async maybeUpdateBacklogStatus(file: TFile, newStatus: string) {
     const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
-    const currentStatus = String(frontmatter.status || 'Backlog').replace(/^['\"]|['\"]$/g, '').trim();
+    const currentStatus = String(frontmatter.status || 'Inbox').replace(/^['\"]|['\"]$/g, '').trim();
     if (currentStatus === newStatus) return;
     await this.app.fileManager.processFrontMatter(file, (fm) => {
       fm.status = newStatus;
@@ -457,7 +467,7 @@ export default class KanbanPlugin extends Plugin {
     const backlinkId = await this.ensureBacklogId(file);
     const inlineTags = tags.length ? ` ${tags.join(' ')}` : '';
 
-    return `${indent}- [${check}] [[Backlog/${file.basename}|${title}]]${inlineTags} <!--backlog-id: ${backlinkId}-->`;
+    return `${indent}- [${check}] [[Tasks/${file.basename}|${title}]]${inlineTags} <!--backlog-id: ${backlinkId}-->`;
   }
 
   async uniqueBacklogPath(title: string) {
@@ -500,7 +510,7 @@ export default class KanbanPlugin extends Plugin {
     await this.app.vault.create(path, content);
 
     return {
-      linkPath: path.replace(/\.md$/, '').replace(`${HUY_BACKLOG_FOLDER}/`, 'Backlog/'),
+      linkPath: path.replace(/\.md$/, '').replace(`${HUY_BACKLOG_FOLDER}/`, 'Tasks/'),
       backlogId,
     };
   }
@@ -521,7 +531,7 @@ export default class KanbanPlugin extends Plugin {
 
     const output: string[] = [];
     const seenBacklogIds = new Set<string>();
-    let currentStatus = 'Backlog';
+    let currentStatus = 'Inbox';
     let createdCount = 0;
     let removedCount = 0;
 
@@ -595,12 +605,12 @@ export default class KanbanPlugin extends Plugin {
     if (showNotice && (createdCount > 0 || removedCount > 0)) {
       const parts: string[] = [];
       if (createdCount > 0) {
-        parts.push(`created ${createdCount} backlog task file${createdCount === 1 ? '' : 's'}`);
+        parts.push(`created ${createdCount} task file${createdCount === 1 ? '' : 's'}`);
       }
       if (removedCount > 0) {
         parts.push(`removed ${removedCount} stale/duplicate card${removedCount === 1 ? '' : 's'}`);
       }
-      new Notice(`Huy Backlog Kanban: ${parts.join(', ')}`);
+      new Notice(`Huy Task Kanban: ${parts.join(', ')}`);
     }
 
     return output.join('\n');
@@ -977,7 +987,7 @@ export default class KanbanPlugin extends Plugin {
           (leaf.view as KanbanView).handleRename(file.path, oldPath);
         });
 
-        if (this.isHuyBacklogFile(file) || oldPath.startsWith(`${HUY_BACKLOG_FOLDER}/`)) {
+        if (this.isHuyBacklogFile(file) || oldPath.startsWith(`${HUY_BACKLOG_FOLDER}/`) || oldPath.startsWith(`${HUY_LEGACY_BACKLOG_FOLDER}/`)) {
           this.syncHuyBacklogKanbanDebounced();
         }
       })
@@ -1061,8 +1071,8 @@ export default class KanbanPlugin extends Plugin {
     });
 
     this.addCommand({
-      id: 'sync-huy-backlog-kanban',
-      name: 'Sync Huy Backlog Kanban from frontmatter',
+      id: 'sync-huy-task-kanban',
+      name: 'Sync Huy Task Kanban from frontmatter',
       callback: () => this.syncHuyBacklogKanban(true),
     });
 
