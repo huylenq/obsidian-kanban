@@ -1182,13 +1182,13 @@ export default class KanbanPlugin extends Plugin {
 
     this.addCommand({
       id: 'sync-huy-task-kanban',
-      name: 'Sync Huy Task Kanban from frontmatter',
+      name: 'Sync Huy tasks',
       callback: () => this.syncHuyBacklogKanban(true),
     });
 
     this.addCommand({
       id: 'archive-old-huy-done-tasks',
-      name: 'Archive old Huy Done tasks',
+      name: 'Archive old Done tasks',
       callback: () => this.archiveOldHuyDoneTasks(),
     });
 
